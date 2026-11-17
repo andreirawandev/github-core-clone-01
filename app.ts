@@ -32,19 +32,12 @@ function sendBuffer(res: ServerResponse, status: number, contentType: string, bo
   res.end(body);
 }
 
-function pathOf(req: IncomingMessage): string {
+function parseUrl(req: IncomingMessage): { pathname: string; query: URLSearchParams } {
   try {
-    return new URL(req.url ?? '/', 'http://entry').pathname;
+    const url = new URL(req.url ?? '/', 'http://entry');
+    return { pathname: url.pathname, query: url.searchParams };
   } catch {
-    return '/';
-  }
-}
-
-function queryOf(req: IncomingMessage): URLSearchParams {
-  try {
-    return new URL(req.url ?? '/', 'http://entry').searchParams;
-  } catch {
-    return new URLSearchParams();
+    return { pathname: '/', query: new URLSearchParams() };
   }
 }
 
@@ -72,10 +65,18 @@ function readBody(req: IncomingMessage): Promise<Buffer> {
 function authorized(req: IncomingMessage): boolean {
   const expected = process.env.MAKEFUN_SHOP_TOKEN ?? '';
   const header = req.headers.authorization ?? '';
-  const match = /^Bearer\s+(.+)$/.exec(header);
-  if (match === null) return false;
-  if (expected !== '') return match[1] === expected;
-  return match[1]!.length > 0;
+  // Fast path for the standard "Bearer <token>" form; anything else falls
+  // through to the general pattern, so unusual spacing still authenticates.
+  let token: string | null = null;
+  if (header.startsWith('Bearer ')) {
+    token = header.slice(7).trim();
+  } else {
+    const match = /^Bearer\s+(.+)$/.exec(header);
+    if (match !== null) token = match[1]!.trim();
+  }
+  if (token === null || token.length === 0) return false;
+  if (expected !== '') return token === expected;
+  return true;
 }
 
 function parseJsonBody(raw: Buffer): { value: unknown; malformed: boolean } {
@@ -94,8 +95,7 @@ export function createApp(): Server {
       const rid = requestId();
       const baseHeaders: Record<string, string> = { 'x-github-request-id': rid };
       const method = req.method ?? 'GET';
-      const path = pathOf(req);
-      const query = queryOf(req);
+      const { pathname: path, query } = parseUrl(req);
       // Link headers must be absolute on the entry's own origin; the Host
       // header of the request is the origin the client is talking to.
       const host = req.headers.host ?? '127.0.0.1';
@@ -204,6 +204,16 @@ export function createApp(): Server {
           if (result.status === 204) {
             res.writeHead(204, baseHeaders);
             res.end();
+            return;
+          }
+          if (result.jsonText !== undefined) {
+            res.writeHead(result.status, {
+              'content-type': JSON_TYPE,
+              'content-length': result.jsonLength ?? Buffer.byteLength(result.jsonText),
+              ...baseHeaders,
+              ...(result.headers ?? {}),
+            });
+            res.end(result.jsonText);
             return;
           }
           sendJson(res, result.status, result.json, { ...baseHeaders, ...(result.headers ?? {}) });

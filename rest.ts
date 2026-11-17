@@ -21,6 +21,13 @@ export interface RestResult {
   status: number;
   json: unknown;
   headers?: Record<string, string>;
+  /**
+   * When set, the response body is already serialized (json is ignored):
+   * the raw line including its trailing newline, with its byte length.
+   * Used for the single-issue GET, whose answer is cached on the issue.
+   */
+  jsonText?: string;
+  jsonLength?: number;
 }
 
 const ok = (json: unknown, status = 200, headers?: Record<string, string>): RestResult => ({ status, json, headers });
@@ -139,6 +146,21 @@ function issueShape(repo: Repo, issue: Issue): Record<string, unknown> {
     author_association: 'OWNER',
     state_reason: null,
   };
+}
+
+/** The single-issue JSON line for `issue`, cached on the issue itself. */
+function issueShapeJson(repo: Repo, issue: Issue): { text: string; length: number } {
+  const cached = issue.jsonCache;
+  if (cached !== null) return cached;
+  const text = `${JSON.stringify(issueShape(repo, issue))}\n`;
+  const line = { text, length: Buffer.byteLength(text) };
+  issue.jsonCache = line;
+  return line;
+}
+
+/** Drop an issue's cached JSON line after any mutation of the issue. */
+export function invalidateIssue(issue: Issue): void {
+  issue.jsonCache = null;
 }
 
 function commentShape(repo: Repo, issue: Issue, comment: { id: number; body: string; createdAt: string }): Record<string, unknown> {
@@ -582,7 +604,10 @@ export function handleRest(
       const issue = repo.issues.find((i) => i.number === issueNumber);
       if (issue === undefined) return err(404, 'Not Found');
       if (rest.length === 2) {
-        if (method === 'GET') return ok(issueShape(repo, issue));
+        if (method === 'GET') {
+          const line = issueShapeJson(repo, issue);
+          return { status: 200, json: null, jsonText: line.text, jsonLength: line.length };
+        }
         if (method === 'PATCH') {
           const title = str(body?.title);
           if (title !== undefined) issue.title = title;
@@ -600,6 +625,7 @@ export function handleRest(
           }
           const { iso } = store.now();
           issue.updatedAt = iso;
+          invalidateIssue(issue);
           return ok(issueShape(repo, issue));
         }
         return err(405, 'Method Not Allowed');
@@ -615,6 +641,7 @@ export function handleRest(
           const comment = { id: repo.nextComment, body: bodyText, user: VIEWER_LOGIN, createdAt: iso };
           repo.nextComment += 1;
           issue.comments.push(comment);
+          invalidateIssue(issue);
           return ok(commentShape(repo, issue, comment), 201);
         }
         return err(405, 'Method Not Allowed');

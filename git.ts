@@ -101,6 +101,11 @@ function v2Advertisement(): Buffer {
   ]);
 }
 
+// The v2 capability advertisement is a constant: the same bytes for every
+// repository and every request, so build it once instead of per call. (The
+// suite requests it three times per clone: advert, ls-refs, fetch.)
+const V2_ADVERTISEMENT = v2Advertisement();
+
 export function handleInfoRefs(
   store: Store,
   owner: string,
@@ -112,7 +117,7 @@ export function handleInfoRefs(
   if (repo === null) return json404('Not Found');
   const contentType = `application/x-${service}-advertisement`;
   if (service === 'git-upload-pack' && gitProtocol === 2) {
-    return { status: 200, contentType, body: v2Advertisement() };
+    return { status: 200, contentType, body: V2_ADVERTISEMENT };
   }
   return { status: 200, contentType, body: v0Advertisement(service, repo) };
 }
@@ -239,6 +244,16 @@ function packFor(repo: Repo, oids: Set<string>): Buffer {
 const packCache = new Map<string, Buffer>();
 const PACK_CACHE_MAX = 64;
 
+// The whole v2 fetch response (shallow-info + packfile sections, framed) is
+// the same pure function of the same inputs, so cache the finished bytes:
+// a repeated identical fetch then costs one map lookup, not a recompute of
+// the plan, the sideband framing and the concatenations. Only single-round
+// (done) fetches are cached: a multi-round answer carries ACKs for the haves
+// the server holds right now, which an object arriving later would make
+// stale, while a done fetch's answer is the closure alone.
+const fetchResponseCache = new Map<string, Buffer>();
+const FETCH_RESPONSE_CACHE_MAX = 64;
+
 function packForCached(repo: Repo, plan: FetchPlan, key: string): Buffer {
   const cached = packCache.get(key);
   if (cached !== undefined) return cached;
@@ -325,6 +340,15 @@ function handleFetchV2(repo: Repo, lines: string[]): GitResponse {
       if (Number.isFinite(n)) depth = n;
     }
   }
+  // Only single-round fetches are cached: a multi-round answer carries
+  // ACKs for the haves the server holds right now, and an object that
+  // arrives later would make a cached NAK stale. A done fetch's answer is
+  // the closure alone, which never changes for fixed inputs.
+  const cacheKey = done ? fetchCacheKey(repo, wants, haves, shallowReq, depth) : null;
+  const cachedBody = cacheKey === null ? undefined : fetchResponseCache.get(cacheKey);
+  if (cachedBody !== undefined) {
+    return { status: 200, contentType: 'application/x-git-upload-pack-result', body: cachedBody };
+  }
   const plan = computeFetch(repo, wants, haves, shallowReq, depth);
   const parts: Buffer[] = [];
   // No acknowledgments section: in stateless v2 fetch the client sends its
@@ -362,7 +386,15 @@ function handleFetchV2(repo: Repo, lines: string[]): GitResponse {
     parts.push(sidebandPack(pack));
     parts.push(pktFlush());
   }
-  return { status: 200, contentType: 'application/x-git-upload-pack-result', body: Buffer.concat(parts) };
+  const body = Buffer.concat(parts);
+  if (cacheKey !== null) {
+    if (fetchResponseCache.size >= FETCH_RESPONSE_CACHE_MAX) {
+      const first = fetchResponseCache.keys().next().value;
+      if (first !== undefined) fetchResponseCache.delete(first);
+    }
+    fetchResponseCache.set(cacheKey, body);
+  }
+  return { status: 200, contentType: 'application/x-git-upload-pack-result', body };
 }
 
 function handleFetchV0(repo: Repo, lines: string[]): GitResponse {

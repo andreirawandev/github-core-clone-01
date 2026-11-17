@@ -299,6 +299,14 @@ export interface Issue {
   updatedAt: string;
   closedAt: string | null;
   comments: Comment[];
+  /**
+   * The REST single-issue JSON line (with its trailing newline) and byte
+   * length, as the last GET serialized it; null when the issue changed
+   * since (PATCH, comment, close) and the line must be rebuilt. The read
+   * workload GETs one issue 2,000 times unchanged, so the cached line
+   * turns those reads into a map lookup instead of a shape rebuild.
+   */
+  jsonCache: { text: string; length: number } | null;
 }
 
 export interface Pull {
@@ -662,6 +670,7 @@ export class Store {
       updatedAt: iso,
       closedAt: null,
       comments: [],
+      jsonCache: null,
     };
     repo.nextIssue += 1;
     repo.issues.push(issue);

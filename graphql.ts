@@ -776,6 +776,7 @@ function executeMutation(state: ExecState, field: FieldNode, path: (string | num
     const { iso } = store.now();
     issue.closedAt = iso;
     issue.updatedAt = iso;
+    issue.jsonCache = null;
     return { __typename: 'CloseIssuePayload', issue: issueObject(repo, issue) };
   }
   if (field.name === 'createPullRequest') {
@@ -810,6 +811,7 @@ function executeMutation(state: ExecState, field: FieldNode, path: (string | num
         const comment = { id: repo.nextComment, body, user: VIEWER_LOGIN, createdAt: iso };
         repo.nextComment += 1;
         issue.comments.push(comment);
+        issue.jsonCache = null;
         return {
           __typename: 'AddCommentPayload',
           commentEdge: { __typename: 'CommentEdge', node: { __typename: 'Comment', id: encodeGlobalId('comment', repo.id, issue.number, comment.id), body } },

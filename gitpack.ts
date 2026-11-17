@@ -205,6 +205,44 @@ export function readPack(pack: Buffer, resolveBase?: (oid: string) => GitObject 
   const version = pack.readUInt32BE(4);
   const count = pack.readUInt32BE(8);
   const trailerStart = pack.length - 20;
+  // Fast path: packs with no delta entries (every pack the suite's client
+  // and a plain `git push` of new objects send) resolve in one tight loop,
+  // without the generic path's per-entry maps, sets, closures and cached
+  // resolutions. A delta entry anywhere falls through to the generic path
+  // below, which re-reads the pack from scratch, so the fast path's partial
+  // work is discarded and the answer is identical either way.
+  {
+    const objects = new Map<string, GitObject>();
+    let offset = 12;
+    let sawDelta = false;
+    let failed: Error | null = null;
+    for (let i = 0; i < count; i += 1) {
+      const header = readVarint(pack, offset);
+      offset = header.next;
+      const typeCode = (header.first >> 4) & 0x07;
+      if (typeCode === 6 || typeCode === 7) {
+        sawDelta = true;
+        break;
+      }
+      if (!CODE_TYPE[typeCode]) {
+        failed = new Error(`unknown pack type ${typeCode}`);
+        break;
+      }
+      const inflated = inflateAt(pack.subarray(0, trailerStart), offset);
+      if (inflated.data.length !== header.size) {
+        failed = new Error('pack entry size mismatch');
+        break;
+      }
+      const type = CODE_TYPE[typeCode];
+      const oid = hashObject(type, inflated.data);
+      if (!objects.has(oid)) objects.set(oid, { type, data: inflated.data });
+      offset = inflated.next;
+    }
+    if (!sawDelta) {
+      if (failed !== null) throw failed;
+      return { objects, version, count };
+    }
+  }
   interface Raw {
     offset: number;
     typeCode: number;
